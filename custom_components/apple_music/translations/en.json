@@ -1,0 +1,57 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Apple Music API",
+        "description": "Enter the host and port of your apple-music-api server running on your Mac.",
+        "data": {
+          "host": "Host (IP address or hostname)",
+          "port": "Port",
+          "api_key": "API key"
+        },
+        "data_description": {
+          "host": "IP address or hostname of the Mac running the server.",
+          "port": "Port the server listens on (8181 by default).",
+          "api_key": "Only needed if the server was installed with an API key. The installer prints it once; leave blank otherwise."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Apple Music API",
+        "description": "Update the API key for your apple-music-api server. Leave the key blank if the server does not require one.",
+        "data": {
+          "host": "Host (IP address or hostname)",
+          "port": "Port",
+          "api_key": "API key"
+        },
+        "data_description": {
+          "host": "IP address or hostname of the Mac running the server. To connect a different server, add a new integration entry instead.",
+          "port": "Port the server listens on (8181 by default).",
+          "api_key": "The key configured on the server (API_KEY). Leave blank if the server does not require one."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Apple Music API",
+        "description": "The apple-music-api server at {host} rejected Home Assistant's requests. Enter the server's current API key. If the server uses an IP allowlist (ALLOWED_IPS), also make sure it includes Home Assistant's IP address.",
+        "data": {
+          "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "The key configured on the server (API_KEY)."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect. Make sure the server is running and the host/port are correct.",
+      "invalid_host": "Invalid host address.",
+      "invalid_auth": "The server rejected the request. Check the API key, and if the server uses an IP allowlist (ALLOWED_IPS), make sure it includes Home Assistant's IP address.",
+      "unknown": "Unexpected error. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This Apple Music server is already configured.",
+      "already_in_progress": "Setup for this Apple Music server is already in progress.",
+      "reconfigure_successful": "Apple Music was reconfigured successfully.",
+      "reauth_successful": "Re-authentication was successful.",
+      "unique_id_mismatch": "Host and port must stay the same when reconfiguring. To connect a different server, add a new Apple Music integration entry."
+    }
+  }
+}
