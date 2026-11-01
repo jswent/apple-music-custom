@@ -663,10 +663,21 @@ var staticOpts = {
 app.use('/artwork-cache', express.static(ARTWORK_DIR, staticOpts));
 app.use('/custom-artwork', express.static(CUSTOM_ARTWORK_DIR, staticOpts));
 
+// Names slugify() can produce, optionally prefixed (playlist-/artist-); no dots or slashes.
+// Slug may be empty (e.g. all non-Latin names), so allow [a-z0-9-]* rather than +
+var ARTWORK_STATIC_RE = /^[a-z0-9-]*\.(jpg|jpeg|png)$/;
+
+// Resolve name under dir, or null if it would escape it (defense in depth)
+function resolveInside(dir, name) {
+  var p = path.resolve(dir, name);
+  return p.indexOf(dir + path.sep) === 0 ? p : null;
+}
+
 // Unified static artwork endpoint — checks custom-artwork first, then artwork-cache
 // Used by browse_media.py for fast direct serving without route logic or AppleScript
 app.get('/artwork-static/:file', function(req, res) {
   var file = req.params.file;
+  if (!ARTWORK_STATIC_RE.test(file)) { return res.sendStatus(400); }
   var exts = ['.jpg', '.jpeg', '.png'];
   var base = file.replace(/\.(jpg|jpeg|png)$/, '');
 
@@ -675,16 +686,16 @@ app.get('/artwork-static/:file', function(req, res) {
 
   // Check custom-artwork using slug (no prefix) for all extensions
   for (var i = 0; i < exts.length; i++) {
-    var custom = path.join(CUSTOM_ARTWORK_DIR, slug + exts[i]);
-    if (fs.existsSync(custom)) {
+    var custom = resolveInside(CUSTOM_ARTWORK_DIR, slug + exts[i]);
+    if (custom && fs.existsSync(custom)) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
       return res.sendFile(custom);
     }
   }
 
   // Fall back to artwork-cache using full base name
-  var cached = path.join(ARTWORK_DIR, base + '.jpg');
-  if (fs.existsSync(cached)) {
+  var cached = resolveInside(ARTWORK_DIR, base + '.jpg');
+  if (cached && fs.existsSync(cached)) {
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
     return res.sendFile(cached);
   }
