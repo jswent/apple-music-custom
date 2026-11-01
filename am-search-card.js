@@ -464,9 +464,10 @@ class AmSearchCard extends HTMLElement {
     const signature = available.map(e => e + '|' + displayName(e)).join(',');
     if (signature !== this._amListSignature) {
       this._amListSignature = signature;
-      list.innerHTML = available.map(e => `<label class="am-player-item" title="${displayName(e)}">
-        <input type="checkbox" data-entity="${e}"/>
-        <span style="overflow:hidden;text-overflow:ellipsis">${displayName(e)}</span>
+      // Namen escapen: friendly_name stammt vom AirPlay-Geraetenamen im LAN
+      list.innerHTML = available.map(e => `<label class="am-player-item" title="${this._esc(displayName(e))}">
+        <input type="checkbox" data-entity="${this._esc(e)}"/>
+        <span style="overflow:hidden;text-overflow:ellipsis">${this._esc(displayName(e))}</span>
       </label>`).join('');
 
       list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -1833,35 +1834,37 @@ class AmSearchCardEditor extends HTMLElement {
     if (players.length === 0) { this._playerSection.innerHTML = ''; return; }
     const playerCfg = this._config.players || {};
     this._playerSection.innerHTML = players.map(e => {
-      const defaultName = this._hass.states[e]?.attributes?.friendly_name || e;
+      // Alle Werte aus HA-State/Konfiguration escapen (AirPlay-Namen sind fremdbestimmt)
+      const defaultName = this._esc(this._hass.states[e]?.attributes?.friendly_name || e);
       const cfg         = playerCfg[e] || {};
       const stateColor  = (this._hass.states[e]?.state === 'unavailable') ? '#888' : '#4caf50';
-      return `<div style="padding:6px 4px;border-bottom:1px solid var(--divider-color)" data-entity="${e}">
+      const ent         = this._esc(e);
+      return `<div style="padding:6px 4px;border-bottom:1px solid var(--divider-color)" data-entity="${ent}">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="width:8px;height:8px;border-radius:50%;background:${stateColor};flex-shrink:0"></span>
           <span style="font-size:0.8em;flex:0 0 110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--primary-text-color)" title="${defaultName}">${defaultName}</span>
-          <input type="text" class="player-name" data-entity="${e}"
-                 placeholder="Benutzerdefinierter Name" value="${cfg.name || ''}"
+          <input type="text" class="player-name" data-entity="${ent}"
+                 placeholder="Benutzerdefinierter Name" value="${this._esc(cfg.name || '')}"
                  style="flex:1;font-size:0.78em;background:var(--card-background-color);
                         border:1px solid var(--divider-color);border-radius:4px;
                         padding:3px 6px;color:var(--primary-text-color)"/>
         </div>
         <div style="display:flex;gap:20px;padding-left:18px;margin-top:2px;border-left:2px solid var(--divider-color)">
           <label style="display:flex;align-items:center;gap:5px;font-size:0.73em;color:var(--secondary-text-color);cursor:pointer">
-            <input type="checkbox" class="player-hidden" data-entity="${e}" ${cfg.hidden ? 'checked' : ''}
+            <input type="checkbox" class="player-hidden" data-entity="${ent}" ${cfg.hidden ? 'checked' : ''}
                    style="cursor:pointer;width:14px;height:14px"/>
             Nie anzeigen
           </label>
           <label style="display:flex;align-items:center;gap:5px;font-size:0.73em;color:var(--secondary-text-color);cursor:pointer">
-            <input type="checkbox" class="player-always-off" data-entity="${e}" ${cfg.always_off ? 'checked' : ''}
+            <input type="checkbox" class="player-always-off" data-entity="${ent}" ${cfg.always_off ? 'checked' : ''}
                    style="cursor:pointer;width:14px;height:14px"/>
             Immer Aus
           </label>
         </div>
         <div style="display:flex;gap:8px;padding-left:18px;margin-top:6px;
                     border-left:2px solid var(--divider-color)">
-          <ha-selector class="player-script-on"  data-entity="${e}" style="flex:1;min-width:0"></ha-selector>
-          <ha-selector class="player-script-off" data-entity="${e}" style="flex:1;min-width:0"></ha-selector>
+          <ha-selector class="player-script-on"  data-entity="${ent}" style="flex:1;min-width:0"></ha-selector>
+          <ha-selector class="player-script-off" data-entity="${ent}" style="flex:1;min-width:0"></ha-selector>
         </div>
       </div>`;
     }).join('');
@@ -1911,6 +1914,9 @@ class AmSearchCardEditor extends HTMLElement {
   _dispatch() {
     this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config }, bubbles: true, composed: true }));
   }
+
+  // Gleiches HTML-Escaping wie in der Karte
+  _esc(str) { return AmSearchCard.prototype._esc(str); }
 }
 
 customElements.define('am-search-card-editor', AmSearchCardEditor);
