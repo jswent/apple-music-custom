@@ -159,7 +159,92 @@ echo -e "${GREEN}✓${RESET} Dependencies installed"
 mkdir -p "$APP_PATH/log"
 echo -e "${GREEN}✓${RESET} Log directory ready (log/)"
 
-# ── 7. Unload any existing services ──────────────────────────────────────────
+# ── 7. Access control ─────────────────────────────────────────────────────────
+# API_KEY, ALLOWED_IPS and HOST come from the environment if set (an empty value
+# clears the setting), else from the installed plist, else a prompt (key and IPs).
+echo ""
+echo "Configuring access control..."
+
+# Print an EnvironmentVariables value from the installed plist (empty if absent)
+existing_env() {
+  [[ -f "$PLIST_DEST" ]] || return 0
+  /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$1" "$PLIST_DEST" 2>/dev/null || true
+}
+
+if [[ -n "${API_KEY+x}" ]]; then
+  KEY_SOURCE="env"
+else
+  API_KEY="$(existing_env API_KEY)"
+  KEY_SOURCE="existing"
+  if [[ -z "$API_KEY" && -t 0 ]]; then
+    read -r -p "  Generate an API key to protect the server? [Y/n] " choice || choice=""
+    choice="${choice:-Y}"
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+      API_KEY="$(openssl rand -hex 32)"
+      KEY_SOURCE="generated"
+    fi
+  fi
+fi
+KEY_RE='^[A-Za-z0-9._~+/=-]*$'
+if [[ ! "$API_KEY" =~ $KEY_RE ]]; then
+  echo -e "${RED}✗ API_KEY may only contain letters, digits and . _ ~ + / = -${RESET}"
+  exit 1
+fi
+
+if [[ -z "${ALLOWED_IPS+x}" ]]; then
+  ALLOWED_IPS="$(existing_env ALLOWED_IPS)"
+  if [[ -t 0 ]]; then
+    if [[ -n "$ALLOWED_IPS" ]]; then
+      read -r -p "  Restrict access to specific IPs/CIDRs (comma-separated, \"none\" = any)? [$ALLOWED_IPS] " ips || ips=""
+    else
+      read -r -p "  Restrict access to specific IPs/CIDRs (comma-separated, blank = any)? " ips || ips=""
+    fi
+    [[ -n "$ips" ]] && ALLOWED_IPS="$ips"
+    [[ "$ALLOWED_IPS" == "none" ]] && ALLOWED_IPS=""
+  fi
+fi
+IPS_RE='^[0-9a-fA-F:.,/ ]*$'
+if [[ ! "$ALLOWED_IPS" =~ $IPS_RE ]]; then
+  echo -e "${RED}✗ ALLOWED_IPS may only contain IP addresses, CIDR ranges, commas and spaces.${RESET}"
+  exit 1
+fi
+# Same parser the server uses, so a bad entry fails here instead of at startup
+if ! node -e 'try { require(process.argv[1]).parseAllowList(process.argv[2]) } catch (e) { console.error("  " + e.message); process.exit(1) }' \
+    "$APP_PATH/lib/access.js" "$ALLOWED_IPS"; then
+  echo -e "${RED}✗ Invalid ALLOWED_IPS.${RESET}"
+  exit 1
+fi
+
+[[ -z "${HOST+x}" ]] && HOST="$(existing_env HOST)"
+HOST_RE='^[0-9A-Za-z.:%-]*$'
+if [[ ! "$HOST" =~ $HOST_RE ]]; then
+  echo -e "${RED}✗ HOST must be an IP address or hostname.${RESET}"
+  exit 1
+fi
+
+if [[ "$KEY_SOURCE" == "generated" ]]; then
+  echo -e "${GREEN}✓${RESET} API key generated. Enter it in the Home Assistant integration"
+  echo "    (when adding it, or Settings → Devices & services → Apple Music → Reconfigure):"
+  echo ""
+  echo -e "      ${BOLD}${API_KEY}${RESET}"
+  echo ""
+  echo "    It is stored in $PLIST_DEST (readable only by you)."
+elif [[ -n "$API_KEY" && "$KEY_SOURCE" == "existing" ]]; then
+  echo -e "${GREEN}✓${RESET} Keeping existing API key (stored in $PLIST_DEST)"
+elif [[ -n "$API_KEY" ]]; then
+  echo -e "${GREEN}✓${RESET} Using API key from the API_KEY environment variable"
+else
+  echo -e "${YELLOW}⚠ No API key: any device that can reach port ${PORT} can control Music.${RESET}"
+fi
+if [[ -n "$ALLOWED_IPS" ]]; then
+  echo -e "${GREEN}✓${RESET} Allowed IPs: $ALLOWED_IPS (localhost is always allowed)"
+fi
+case "$HOST" in
+  ""|0.0.0.0|::|localhost|127.0.0.1|::1) ;;
+  *) echo -e "${YELLOW}⚠ HOST=$HOST: notify.py posts to http://localhost:${PORT}, so instant updates need the server to listen on localhost too.${RESET}" ;;
+esac
+
+# ── 8. Unload any existing services ──────────────────────────────────────────
 for label in "$PLIST_LABEL" "$NOTIFY_PLIST_LABEL"; do
   dest="$HOME/Library/LaunchAgents/${label}.plist"
   if launchctl list | grep -q "$label" 2>/dev/null; then
@@ -167,17 +252,26 @@ for label in "$PLIST_LABEL" "$NOTIFY_PLIST_LABEL"; do
   fi
 done
 
-# ── 8. Write API server plist ─────────────────────────────────────────────────
+# ── 9. Write API server plist ─────────────────────────────────────────────────
+# The plist holds the API key, so create it private (umask) rather than chmod after
 mkdir -p "$HOME/Library/LaunchAgents"
-sed \
-  -e "s#%APP_PATH%#$APP_PATH#g" \
-  -e "s#%PORT%#$PORT#g" \
-  -e "s#/usr/local/bin/node#$NODE_BIN#g" \
-  "$APP_PATH/config/com.apple-music-api.plist" \
-  > "$PLIST_DEST"
+rm -f "$PLIST_DEST"
+(
+  umask 077
+  sed \
+    -e "s#%APP_PATH%#$APP_PATH#g" \
+    -e "s#%PORT%#$PORT#g" \
+    -e "s#%API_KEY%#$API_KEY#g" \
+    -e "s#%ALLOWED_IPS%#$ALLOWED_IPS#g" \
+    -e "s#%HOST%#$HOST#g" \
+    -e "s#/usr/local/bin/node#$NODE_BIN#g" \
+    "$APP_PATH/config/com.apple-music-api.plist" \
+    > "$PLIST_DEST"
+)
+chmod 600 "$PLIST_DEST"
 echo -e "${GREEN}✓${RESET} API server plist written"
 
-# ── 9. Write notify plist ─────────────────────────────────────────────────────
+# ── 10. Write notify plist ────────────────────────────────────────────────────
 if [[ -n "$PYTHON_BIN" ]]; then
   cat > "$NOTIFY_PLIST_DEST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -210,7 +304,7 @@ EOF
   echo -e "${GREEN}✓${RESET} Notification listener plist written"
 fi
 
-# ── 10. Load services ─────────────────────────────────────────────────────────
+# ── 11. Load services ─────────────────────────────────────────────────────────
 launchctl load -w "$PLIST_DEST"
 echo -e "${GREEN}✓${RESET} API server loaded and set to start at login"
 
@@ -226,6 +320,13 @@ echo ""
 echo -e "  Server:       ${BOLD}http://localhost:${PORT}${RESET}"
 echo -e "  Now playing:  http://localhost:${PORT}/now_playing"
 echo -e "  Logs:         ${APP_PATH}/log/"
+echo -e "  Listening on: ${HOST:-all interfaces}"
+if [[ -n "$API_KEY" ]]; then
+  echo -e "  API key:      required for clients other than this Mac"
+else
+  echo -e "  API key:      ${YELLOW}not required${RESET}"
+fi
+echo -e "  Allowed IPs:  ${ALLOWED_IPS:-any}"
 echo ""
 if [[ -z "$PYTHON_BIN" ]]; then
   echo -e "  ${YELLOW}⚠ Instant notifications not installed (Python 3.10+ required).${RESET}"

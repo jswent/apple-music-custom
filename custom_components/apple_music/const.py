@@ -1,4 +1,6 @@
 """Constants for the Apple Music integration."""
+from homeassistant.const import CONF_API_KEY  # noqa: F401  (re-exported)
+
 DOMAIN = "apple_music"
 CONF_HOST = "host"
 CONF_PORT = "port"
