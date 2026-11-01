@@ -139,7 +139,7 @@ The server exposes a local HTTP API on port `8181`. Key endpoints:
 | PUT | `/airplay_devices/:id/off` | Disable AirPlay device |
 | PUT | `/airplay_devices/:id/volume` | Set AirPlay device volume |
 | GET | `/events` | SSE stream for instant push updates |
-| POST | `/notify` | Receive macOS Music app notifications (used internally by notify.py) |
+| POST | `/notify` | Receive macOS Music app notifications (used internally by notify.py; localhost only, JSON body) |
 
 ---
 
@@ -284,6 +284,7 @@ data:
 **State not updating instantly**
 - Check the notify service is running: `cat ~/apple-music-custom/server/log/notify.log`
 - Re-run `npm run install-service` to rebuild the Python environment
+- `/notify` only accepts `Content-Type: application/json` requests from localhost (other clients get `403`). notify.py must run on the same Mac as the server, with `APPLE_MUSIC_API_URL` set to `http://localhost:<port>` (the installer default), not the Mac's LAN IP or hostname
 
 **Media browser is slow on first open**
 - The library cache is still warming on startup. Wait 30–60 seconds after the server starts. After that it stays warm indefinitely via background refresh.

@@ -531,40 +531,54 @@ app.get('/events', function(req, res) {
   });
 });
 
-app.post('/notify', function(req, res) {
-  var body = '';
-  req.on('data', function(chunk) { body += chunk; });
-  req.on('end', function() {
-    try {
-      var notification = JSON.parse(body);
-      var state = notification.player_state.toLowerCase();
+// True for loopback addresses as reported by req.socket.remoteAddress:
+// IPv4 127.0.0.0/8, IPv6 ::1, and IPv4-mapped ::ffff:127.x.x.x.
+function isLoopbackAddress(addr) {
+  if (typeof addr !== 'string') return false;
+  addr = addr.toLowerCase();
+  if (addr === '::1') return true;
+  if (addr.indexOf('::ffff:') === 0) addr = addr.slice(7);
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(addr);
+}
 
-      // Map Music notification state to our state format
-      var playerState = state === 'playing' ? 'playing'
-                      : state === 'paused'  ? 'paused'
-                      : state === 'stopped' ? 'stopped'
-                      : 'stopped';
+function requireLoopback(req, res, next) {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) return res.sendStatus(403);
+  next();
+}
 
-      // Build a partial state update from the notification
-      // player_position is not available in notifications - HA will use last known
-      var update = {
-        player_state:      playerState,
-        id:                notification.persistent_id,
-        name:              notification.name,
-        artist:            notification.artist,
-        album:             notification.album,
-        player_duration:   notification.total_time / 1000,
-        position_timestamp: Date.now(),
-        _from_notification: true
-      };
+// Only notify.py on this Mac should post here. Loopback-only, and JSON-only so a
+// web page can't forge a "simple" (text/plain or form) cross-site POST.
+app.post('/notify', requireLoopback, express.json({ limit: '64kb' }), function(req, res) {
+  var notification = req.body;
+  if (!req.is('application/json') || !notification ||
+      typeof notification.player_state !== 'string') {
+    return res.sendStatus(400);
+  }
 
-      pushedState = update;
-      broadcastSSE(update);
-      res.sendStatus(200);
-    } catch(e) {
-      res.sendStatus(400);
-    }
-  });
+  var state = notification.player_state.toLowerCase();
+
+  // Map Music notification state to our state format
+  var playerState = state === 'playing' ? 'playing'
+                  : state === 'paused'  ? 'paused'
+                  : state === 'stopped' ? 'stopped'
+                  : 'stopped';
+
+  // Build a partial state update from the notification
+  // player_position is not available in notifications - HA will use last known
+  var update = {
+    player_state:      playerState,
+    id:                notification.persistent_id,
+    name:              notification.name,
+    artist:            notification.artist,
+    album:             notification.album,
+    player_duration:   notification.total_time / 1000,
+    position_timestamp: Date.now(),
+    _from_notification: true
+  };
+
+  pushedState = update;
+  broadcastSSE(update);
+  res.sendStatus(200);
 });
 
 app.get('/', function(req, res) {
