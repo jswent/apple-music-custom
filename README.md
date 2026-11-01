@@ -56,7 +56,7 @@ State updates use **Server-Sent Events (SSE)** driven by macOS distributed notif
 - Apple Music app
 
 **Home Assistant:**
-- Home Assistant 2024.1 or later
+- Home Assistant 2025.5 or later
 - HACS (for easy install)
 
 ---
@@ -79,6 +79,7 @@ That's it. The installer handles everything automatically:
 - Finds Python 3.10+ on your system, checking Homebrew, MacPorts, and system paths
 - Creates an isolated Python environment in `.venv/` — no global installs or pollution
 - Installs `pyobjc` into the venv
+- Offers to protect the server with an API key and/or an IP allowlist (see [Security](#security))
 - Registers two background services that auto-start at login and restart if they crash:
   - **apple-music-custom/server** — the REST API server on port `8181`
   - **apple-music-notify** — listens for macOS Music app notifications and pushes instant state changes to HA
@@ -110,7 +111,7 @@ npm run uninstall-service
 
 ### Server API
 
-The server exposes a local HTTP API on port `8181`. Key endpoints:
+The server exposes a local HTTP API on port `8181`. If an API key is configured, every endpoint (including `/_ping`, `/events` and the web UI) requires it for requests from other machines; see [Security](#security). Key endpoints:
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -159,10 +160,69 @@ Copy the `custom_components/apple_music/` folder into your HA `config/custom_com
 
 1. Go to **Settings → Integrations → Add Integration**
 2. Search for **Apple Music**
-3. Enter your Mac's IP address and port (`8181`)
+3. Enter your Mac's IP address and port (`8181`), and the API key if the server has one (leave it blank otherwise)
 4. Click **Submit**
 
 Home Assistant will discover your Apple Music player and all AirPlay devices automatically.
+
+---
+
+## Security
+
+Out of the box the server accepts requests from any device that can reach port `8181`, as in earlier versions. Two optional settings lock it down; use either or both:
+
+| Setting | Effect |
+|---|---|
+| `API_KEY` | Clients other than the Mac itself must send the key as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Missing or wrong key → `401 {"error":"unauthorized"}` |
+| `ALLOWED_IPS` | Comma-separated IPv4/IPv6 addresses and CIDR ranges, e.g. `192.168.1.20, 10.0.0.0/24, fd00::/8`. Other clients → `403 {"error":"forbidden"}` |
+| `HOST` | Optional address to listen on (default: all interfaces). Advanced; see the note below |
+
+- **Requests from the Mac itself are always allowed** (`127.0.0.1`, `::1`), so `http://localhost:8181`, the web UI opened on the Mac, and `notify.py` keep working without a key.
+- Both settings cover every endpoint, including `/_ping`, `/events`, the web UI and artwork. Browsers can't send the key, so open the web UI and URLs like `/debug/artwork-slugs` on the Mac itself (`http://localhost:8181/...`) or use `curl` with the header.
+- `ALLOWED_IPS` is checked against the TCP peer address; `X-Forwarded-For` is ignored. Don't put the server behind a reverse proxy when using it, since every request would appear to come from the proxy.
+- The server speaks plain HTTP, so the key crosses your LAN unencrypted. It stops other devices and web pages from controlling Music, but not someone who can sniff your network traffic.
+- The key is never logged. An invalid `ALLOWED_IPS` entry stops the server at startup with a message in `log/error.log`.
+- `HOST`: `notify.py` posts to `http://localhost:<port>`, so if you bind to a single LAN address, instant updates stop working. Use it only for values like `127.0.0.1` (local only) or `::`/`0.0.0.0`.
+
+### On the Mac
+
+`npm run install-service` asks:
+
+- **Generate an API key to protect the server? [Y/n]**: creates a random 64-character key and prints it **once**. Copy it into Home Assistant.
+- **Restrict access to specific IPs/CIDRs?**: for example your Home Assistant's IP address. Leave it blank to allow any address.
+
+The settings are stored in `~/Library/LaunchAgents/com.apple-music-api.plist` (readable only by you). Re-running the installer keeps them. Environment variables override them and skip the prompts; an empty value turns a setting off:
+
+```bash
+# Show the current key
+/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:API_KEY' ~/Library/LaunchAgents/com.apple-music-api.plist
+
+# Rotate the key, then show it with the command above and enter it in Home Assistant
+API_KEY="$(openssl rand -hex 32)" npm run install-service
+
+# Allow only Home Assistant
+ALLOWED_IPS="192.168.1.20" npm run install-service
+
+# Turn both off again
+API_KEY= ALLOWED_IPS= npm run install-service
+```
+
+The installer accepts keys made of letters, digits and `. _ ~ + / = -`. For `npm run dev`, pass the same variables on the command line, e.g. `API_KEY=... npm run dev`.
+
+Test from another machine:
+
+```bash
+curl -H "Authorization: Bearer <key>" http://<mac-ip>:8181/now_playing
+curl -H "X-API-Key: <key>" http://<mac-ip>:8181/_ping
+```
+
+### In Home Assistant
+
+- **New setup:** enter the key in the **API key** field when adding the integration.
+- **Existing setup:** go to **Settings → Devices & services → Apple Music**, open the entry's menu (⋮), choose **Reconfigure** and enter the key. Leave the field blank to remove a key.
+- If the server later rejects Home Assistant (the key changed, or HA's IP isn't in `ALLOWED_IPS`), Home Assistant asks you to re-authenticate the integration under **Settings → Devices & services**. Open it and enter the current key.
+
+It doesn't matter whether you configure the Mac or Home Assistant first.
 
 ---
 
@@ -231,7 +291,7 @@ Custom artwork takes priority over the auto-generated collage. To find the exact
 http://<mac-ip>:8181/debug/artwork-slugs
 ```
 
-This returns all playlists with their slug, expected filename, and whether a custom file was found.
+This returns all playlists with their slug, expected filename, and whether a custom file was found. If the server has an API key, open it on the Mac itself as `http://localhost:8181/debug/artwork-slugs` instead.
 
 Custom artwork also works for artists and albums using the same slug naming convention.
 
@@ -278,8 +338,15 @@ data:
 ## Troubleshooting
 
 **Integration shows unavailable**
-- Check the server is running: `curl http://<mac-ip>:8181/_ping`
+- Check the server is running: `curl http://<mac-ip>:8181/_ping` (add `-H "Authorization: Bearer <key>"` if the server has an API key)
 - Check the Mac firewall allows connections on port 8181
+
+**Home Assistant asks to re-authenticate, or 401/403 in the server log**
+- `401`: Home Assistant's key doesn't match the server's `API_KEY`. Show the server's key (see [Security](#security)) and enter it in Home Assistant via the re-authentication prompt or **Reconfigure**
+- `403`: Home Assistant's IP address isn't in `ALLOWED_IPS`. The server log (`~/apple-music-custom/server/log/output.log`) shows the address each request came from; add it and re-run `npm run install-service`
+
+**Album art missing after adding an API key**
+- On Home Assistant versions before 2026.9, HA's image cache also keeps failed artwork fetches, so artwork requested while the key was missing or wrong can stay blank. Restart Home Assistant after configuring the key
 
 **State not updating instantly**
 - Check the notify service is running: `cat ~/apple-music-custom/server/log/notify.log`
