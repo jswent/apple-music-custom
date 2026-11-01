@@ -9,14 +9,32 @@ var iTunes = require('local-itunes')
 var osa = require('osa')
 var osascript = require('osascript')
 var parameterize = require('parameterize');
+var access = require('./lib/access');
+
+// Access control (see README "Security"). Empty/unset means off.
+var API_KEY = (process.env.API_KEY || '').trim();
+var HOST = (process.env.HOST || '').trim();
+var allowList;
+try {
+  allowList = access.parseAllowList(process.env.ALLOWED_IPS);
+} catch (e) {
+  console.error('[access] ' + e.message);
+  process.exit(1);
+}
+console.log('[access] API key ' + (API_KEY ? 'required' : 'not required') +
+  ' for non-loopback clients; IP allowlist: ' +
+  (allowList ? allowList.size + ' entr' + (allowList.size === 1 ? 'y' : 'ies') : 'off (any address)'));
 
 var app = express()
-app.use(bodyParser.urlencoded({ extended: false }))
-app.use(express.static(path.join(__dirname, 'public')));
 
-
+// Logger first so rejected (401/403) requests are logged too
 var logFormat = "'[:date[iso]] - :remote-addr - :method :url :status :response-time ms - :res[content-length]b'"
 app.use(morgan(logFormat))
+
+// Gate must precede static files and every route
+app.use(access.createAccessGate({ apiKey: API_KEY, allowList: allowList }))
+app.use(bodyParser.urlencoded({ extended: false }))
+app.use(express.static(path.join(__dirname, 'public')));
 
 
 function getCurrentState() {
@@ -516,7 +534,6 @@ app.get('/events', function(req, res) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
   // Send current state immediately on connect
@@ -531,24 +548,16 @@ app.get('/events', function(req, res) {
   });
 });
 
-// True for loopback addresses as reported by req.socket.remoteAddress:
-// IPv4 127.0.0.0/8, IPv6 ::1, and IPv4-mapped ::ffff:127.x.x.x.
-function isLoopbackAddress(addr) {
-  if (typeof addr !== 'string') return false;
-  addr = addr.toLowerCase();
-  if (addr === '::1') return true;
-  if (addr.indexOf('::ffff:') === 0) addr = addr.slice(7);
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(addr);
-}
-
 function requireLoopback(req, res, next) {
-  if (!isLoopbackAddress(req.socket.remoteAddress)) return res.sendStatus(403);
+  if (!access.isLoopbackAddress(req.socket.remoteAddress)) return res.sendStatus(403);
   next();
 }
 
 // Only notify.py on this Mac should post here. Loopback-only, and JSON-only so a
 // web page can't forge a "simple" (text/plain or form) cross-site POST.
 app.post('/notify', requireLoopback, express.json({ limit: '64kb' }), function(req, res) {
+  // Browsers always send Origin on POST; notify.py never does
+  if (req.headers.origin) return res.sendStatus(403);
   var notification = req.body;
   if (!req.is('application/json') || !notification ||
       typeof notification.player_state !== 'string') {
@@ -1762,7 +1771,12 @@ app.get('/library/tracks', function(req, res) {
   });
 });
 
-app.listen(process.env.PORT || 8181);
+// HOST unset = all interfaces (previous behaviour)
+var server = app.listen(process.env.PORT || 8181, HOST || undefined);
+server.on('error', function(err) {
+  console.error('Cannot listen on ' + (HOST || '*') + ':' + (process.env.PORT || 8181) + ': ' + err.message);
+  process.exit(1);
+});
 
 getLibraryTracks(function(error, tracks) {
   if (error) {
