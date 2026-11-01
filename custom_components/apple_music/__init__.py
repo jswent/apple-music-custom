@@ -8,12 +8,14 @@ from datetime import timedelta
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_HOST, CONF_PORT, DOMAIN, SCAN_INTERVAL_SECONDS
+from .const import CONF_API_KEY, CONF_HOST, CONF_PORT, DOMAIN, SCAN_INTERVAL_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +30,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     port = entry.data[CONF_PORT]
     session = async_get_clientsession(hass)
 
-    coordinator = AppleMusicCoordinator(hass, session, host, port)
+    coordinator = AppleMusicCoordinator(
+        hass, session, host, port, entry.data.get(CONF_API_KEY)
+    )
 
     # First refresh checks server availability - will raise ConfigEntryNotReady if down
     await coordinator.async_config_entry_first_refresh()
@@ -36,7 +40,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Fix 1: Start listener only after HA bootstrap is finished
+    # Fix 1: Start listener only after HA bootstrap is finished.
+    # async_at_started also runs it right away when the entry is reloaded
+    # (e.g. after reconfigure/reauth), where the STARTED event won't fire again.
     async def _start_background_tasks(_):
         """Start persistent tasks after HA bootstrap is complete."""
         entry.async_create_background_task(
@@ -45,9 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Fix 2: Warm cache with short 10s timeout
         await coordinator._async_warm_library_cache()
 
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_background_tasks)
-    )
+    entry.async_on_unload(async_at_started(hass, _start_background_tasks))
 
     return True
 
@@ -67,9 +71,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 class AppleMusicCoordinator(DataUpdateCoordinator):
     """Coordinator that uses SSE for instant updates with polling fallback."""
 
-    def __init__(self, hass, session, host, port):
+    def __init__(self, hass, session, host, port, api_key: str | None = None):
         self.session = session
         self.base_url = f"http://{host}:{port}"
+        # Sent on every request; HA's shared session headers must not be mutated
+        self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._airplay_devices = {}
         self._sse_running = True
         self._sse_connected = False
@@ -87,7 +93,8 @@ class AppleMusicCoordinator(DataUpdateCoordinator):
             # Fix 2: Explicit 10s timeout to prevent HA 2-minute stall
             async with self.session.get(
                 f"{self.base_url}/library/albums?limit=1",
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers=self.headers,
             ) as resp:
                 resp.raise_for_status()
                 await resp.json(content_type=None)
@@ -104,7 +111,7 @@ class AppleMusicCoordinator(DataUpdateCoordinator):
                 async with self.session.get(
                     f"{self.base_url}/events",
                     timeout=aiohttp.ClientTimeout(total=None, connect=10),
-                    headers={"Accept": "text/event-stream"},
+                    headers={**self.headers, "Accept": "text/event-stream"},
                 ) as resp:
                     resp.raise_for_status()
                     _LOGGER.info("SSE connected — using %ds poll interval", POLL_INTERVAL_SSE)
@@ -169,16 +176,28 @@ class AppleMusicCoordinator(DataUpdateCoordinator):
         """Poll for full player state and AirPlay devices."""
         try:
             async with self.session.get(
-                f"{self.base_url}/now_playing", timeout=aiohttp.ClientTimeout(total=5)
+                f"{self.base_url}/now_playing",
+                timeout=aiohttp.ClientTimeout(total=5),
+                headers=self.headers,
             ) as resp:
+                # 401: missing/wrong API key, 403: HA's IP not in ALLOWED_IPS.
+                # Triggers HA's reauth flow; other errors stay UpdateFailed.
+                if resp.status in (401, 403):
+                    raise ConfigEntryAuthFailed(
+                        f"Apple Music server rejected the request (HTTP {resp.status})"
+                    )
                 resp.raise_for_status()
                 now_playing = await resp.json()
+        except ConfigEntryAuthFailed:
+            raise
         except Exception as err:
             raise UpdateFailed(f"API Error: {err}") from err
 
         try:
             async with self.session.get(
-                f"{self.base_url}/airplay_devices", timeout=aiohttp.ClientTimeout(total=5)
+                f"{self.base_url}/airplay_devices",
+                timeout=aiohttp.ClientTimeout(total=5),
+                headers=self.headers,
             ) as resp:
                 resp.raise_for_status()
                 airplay_data = await resp.json()
@@ -192,11 +211,13 @@ class AppleMusicCoordinator(DataUpdateCoordinator):
 
     async def async_send_command(self, method: str, path: str, **kwargs) -> dict | None:
         """Send a command to the server."""
+        headers = {**self.headers, **(kwargs.pop("headers", None) or {})}
         try:
             async with self.session.request(
                 method,
                 f"{self.base_url}{path}",
                 timeout=aiohttp.ClientTimeout(total=10),
+                headers=headers,
                 **kwargs,
             ) as resp:
                 resp.raise_for_status()
@@ -209,7 +230,9 @@ class AppleMusicCoordinator(DataUpdateCoordinator):
         """General GET request helper."""
         try:
             async with self.session.get(
-                f"{self.base_url}{path}", timeout=aiohttp.ClientTimeout(total=30)
+                f"{self.base_url}{path}",
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers=self.headers,
             ) as resp:
                 resp.raise_for_status()
                 return await resp.json(content_type=None)

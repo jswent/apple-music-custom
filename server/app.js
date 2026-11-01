@@ -9,14 +9,32 @@ var iTunes = require('local-itunes')
 var osa = require('osa')
 var osascript = require('osascript')
 var parameterize = require('parameterize');
+var access = require('./lib/access');
+
+// Access control (see README "Security"). Empty/unset means off.
+var API_KEY = (process.env.API_KEY || '').trim();
+var HOST = (process.env.HOST || '').trim();
+var allowList;
+try {
+  allowList = access.parseAllowList(process.env.ALLOWED_IPS);
+} catch (e) {
+  console.error('[access] ' + e.message);
+  process.exit(1);
+}
+console.log('[access] API key ' + (API_KEY ? 'required' : 'not required') +
+  ' for non-loopback clients; IP allowlist: ' +
+  (allowList ? allowList.size + ' entr' + (allowList.size === 1 ? 'y' : 'ies') : 'off (any address)'));
 
 var app = express()
-app.use(bodyParser.urlencoded({ extended: false }))
-app.use(express.static(path.join(__dirname, 'public')));
 
-
+// Logger first so rejected (401/403) requests are logged too
 var logFormat = "'[:date[iso]] - :remote-addr - :method :url :status :response-time ms - :res[content-length]b'"
 app.use(morgan(logFormat))
+
+// Gate must precede static files and every route
+app.use(access.createAccessGate({ apiKey: API_KEY, allowList: allowList }))
+app.use(bodyParser.urlencoded({ extended: false }))
+app.use(express.static(path.join(__dirname, 'public')));
 
 
 function getCurrentState() {
@@ -516,7 +534,6 @@ app.get('/events', function(req, res) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
 
   // Send current state immediately on connect
@@ -531,40 +548,46 @@ app.get('/events', function(req, res) {
   });
 });
 
-app.post('/notify', function(req, res) {
-  var body = '';
-  req.on('data', function(chunk) { body += chunk; });
-  req.on('end', function() {
-    try {
-      var notification = JSON.parse(body);
-      var state = notification.player_state.toLowerCase();
+function requireLoopback(req, res, next) {
+  if (!access.isLoopbackAddress(req.socket.remoteAddress)) return res.sendStatus(403);
+  next();
+}
 
-      // Map Music notification state to our state format
-      var playerState = state === 'playing' ? 'playing'
-                      : state === 'paused'  ? 'paused'
-                      : state === 'stopped' ? 'stopped'
-                      : 'stopped';
+// Only notify.py on this Mac should post here. Loopback-only, and JSON-only so a
+// web page can't forge a "simple" (text/plain or form) cross-site POST.
+app.post('/notify', requireLoopback, express.json({ limit: '64kb' }), function(req, res) {
+  // Browsers always send Origin on POST; notify.py never does
+  if (req.headers.origin) return res.sendStatus(403);
+  var notification = req.body;
+  if (!req.is('application/json') || !notification ||
+      typeof notification.player_state !== 'string') {
+    return res.sendStatus(400);
+  }
 
-      // Build a partial state update from the notification
-      // player_position is not available in notifications - HA will use last known
-      var update = {
-        player_state:      playerState,
-        id:                notification.persistent_id,
-        name:              notification.name,
-        artist:            notification.artist,
-        album:             notification.album,
-        player_duration:   notification.total_time / 1000,
-        position_timestamp: Date.now(),
-        _from_notification: true
-      };
+  var state = notification.player_state.toLowerCase();
 
-      pushedState = update;
-      broadcastSSE(update);
-      res.sendStatus(200);
-    } catch(e) {
-      res.sendStatus(400);
-    }
-  });
+  // Map Music notification state to our state format
+  var playerState = state === 'playing' ? 'playing'
+                  : state === 'paused'  ? 'paused'
+                  : state === 'stopped' ? 'stopped'
+                  : 'stopped';
+
+  // Build a partial state update from the notification
+  // player_position is not available in notifications - HA will use last known
+  var update = {
+    player_state:      playerState,
+    id:                notification.persistent_id,
+    name:              notification.name,
+    artist:            notification.artist,
+    album:             notification.album,
+    player_duration:   notification.total_time / 1000,
+    position_timestamp: Date.now(),
+    _from_notification: true
+  };
+
+  pushedState = update;
+  broadcastSSE(update);
+  res.sendStatus(200);
 });
 
 app.get('/', function(req, res) {
@@ -663,10 +686,21 @@ var staticOpts = {
 app.use('/artwork-cache', express.static(ARTWORK_DIR, staticOpts));
 app.use('/custom-artwork', express.static(CUSTOM_ARTWORK_DIR, staticOpts));
 
+// Names slugify() can produce, optionally prefixed (playlist-/artist-); no dots or slashes.
+// Slug may be empty (e.g. all non-Latin names), so allow [a-z0-9-]* rather than +
+var ARTWORK_STATIC_RE = /^[a-z0-9-]*\.(jpg|jpeg|png)$/;
+
+// Resolve name under dir, or null if it would escape it (defense in depth)
+function resolveInside(dir, name) {
+  var p = path.resolve(dir, name);
+  return p.indexOf(dir + path.sep) === 0 ? p : null;
+}
+
 // Unified static artwork endpoint — checks custom-artwork first, then artwork-cache
 // Used by browse_media.py for fast direct serving without route logic or AppleScript
 app.get('/artwork-static/:file', function(req, res) {
   var file = req.params.file;
+  if (!ARTWORK_STATIC_RE.test(file)) { return res.sendStatus(400); }
   var exts = ['.jpg', '.jpeg', '.png'];
   var base = file.replace(/\.(jpg|jpeg|png)$/, '');
 
@@ -675,16 +709,16 @@ app.get('/artwork-static/:file', function(req, res) {
 
   // Check custom-artwork using slug (no prefix) for all extensions
   for (var i = 0; i < exts.length; i++) {
-    var custom = path.join(CUSTOM_ARTWORK_DIR, slug + exts[i]);
-    if (fs.existsSync(custom)) {
+    var custom = resolveInside(CUSTOM_ARTWORK_DIR, slug + exts[i]);
+    if (custom && fs.existsSync(custom)) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
       return res.sendFile(custom);
     }
   }
 
   // Fall back to artwork-cache using full base name
-  var cached = path.join(ARTWORK_DIR, base + '.jpg');
-  if (fs.existsSync(cached)) {
+  var cached = resolveInside(ARTWORK_DIR, base + '.jpg');
+  if (cached && fs.existsSync(cached)) {
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
     return res.sendFile(cached);
   }
@@ -1737,7 +1771,12 @@ app.get('/library/tracks', function(req, res) {
   });
 });
 
-app.listen(process.env.PORT || 8181);
+// HOST unset = all interfaces (previous behaviour)
+var server = app.listen(process.env.PORT || 8181, HOST || undefined);
+server.on('error', function(err) {
+  console.error('Cannot listen on ' + (HOST || '*') + ':' + (process.env.PORT || 8181) + ': ' + err.message);
+  process.exit(1);
+});
 
 getLibraryTracks(function(error, tracks) {
   if (error) {

@@ -6,6 +6,7 @@ import logging
 from collections import OrderedDict
 from datetime import datetime, timezone
 
+import aiohttp
 from homeassistant.components.media_player import (
     BrowseMedia,
     MediaClass,
@@ -57,6 +58,31 @@ AIRPLAY_FEATURES = (
     | MediaPlayerEntityFeature.TURN_ON
     | MediaPlayerEntityFeature.TURN_OFF
 )
+
+
+async def _async_fetch_server_image(
+    coordinator: AppleMusicCoordinator, url: str
+) -> tuple[bytes | None, str | None]:
+    """Fetch artwork from the Mac server, sending its API key if configured.
+
+    Replaces MediaPlayerEntity._async_fetch_image, whose default request
+    carries no custom headers and would get 401 from a key-protected server.
+    """
+    # Only ever send the key to our own server
+    headers = coordinator.headers if url.startswith(f"{coordinator.base_url}/") else {}
+    try:
+        async with coordinator.session.get(
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status != 200:
+                _LOGGER.debug("Artwork %s returned HTTP %s", url, resp.status)
+                return None, None
+            content = await resp.read()
+            content_type = resp.headers.get("Content-Type")
+            return content, content_type.split(";")[0] if content_type else None
+    except (aiohttp.ClientError, TimeoutError) as err:
+        _LOGGER.debug("Artwork %s failed: %s", url, err)
+        return None, None
 
 
 async def async_setup_entry(
@@ -195,6 +221,10 @@ class AppleMusicPlayer(CoordinatorEntity, MediaPlayerEntity):
     def media_image_remotely_accessible(self) -> bool:
         # Image is served from the local Mac — not reachable from outside the LAN
         return False
+
+    async def _async_fetch_image(self, url: str) -> tuple[bytes | None, str | None]:
+        """Fetch artwork (now playing and browse) with the server's API key."""
+        return await _async_fetch_server_image(self.coordinator, url)
 
 
     @property
@@ -636,6 +666,10 @@ class AirPlaySpeaker(CoordinatorEntity, MediaPlayerEntity):
     @property
     def media_image_remotely_accessible(self) -> bool:
         return False
+
+    async def _async_fetch_image(self, url: str) -> tuple[bytes | None, str | None]:
+        """Fetch artwork with the server's API key."""
+        return await _async_fetch_server_image(self.coordinator, url)
 
     @property
     def media_title(self) -> str | None:
